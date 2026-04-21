@@ -1,0 +1,777 @@
+#TRANSFER 1
+
+#Fitting the Norberg model using rTPC 
+
+#load packages
+library(remotes)
+remotes::install_github("padpadpadpad/rTPC")
+library(rTPC)
+library(nls.multstart)
+library(minpack.lm)
+library(car)
+library(broom)
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+conflicted::conflicts_prefer(dplyr::select)
+conflicted::conflicts_prefer(dplyr::filter)
+
+#Plot my data
+ggplot(combined_TPC1, aes(temperature, growth, col = factor(light))) +
+  geom_point() +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity'
+  )
+
+#Check structure - check if i am fitting the TPC through the replicates - n > 0 = YES
+combined_TPC1 %>%
+  group_by(light, temperature) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  print(n = Inf)
+
+#Variance per temperature per light - this checks what bootstrapping approach to use based on variance - HERE = WEIGHTED 
+combined_TPC1 %>%
+  group_by(light, temperature) %>%
+  summarise(
+    mean_growth = mean(growth),
+    sd_growth   = sd(growth),
+    cv          = sd_growth / abs(mean_growth) * 100,  # coefficient of variation %
+    .groups = "drop"
+  ) %>%
+  print(n = Inf)
+
+#Calculate the SD for the replicates 
+combined_TPC1 <- combined_TPC1 %>%
+  group_by(light, temperature) %>%
+  mutate(sd_growth = sd(growth, na.rm = TRUE)) %>%
+  ungroup()
+
+#Split data by light level 
+data_50 <- filter(combined_TPC1, light ==50)
+data_100 <- filter (combined_TPC1, light == 100)
+
+#Fit nls_mulstart to get the starting values for each light level 
+#50 PHOTONS 
+nls_fit_50 <- nls_multstart(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_50,
+  iter = c(4,4,4,4),
+  start_lower = get_start_vals(data_50$temperature, data_50$growth, model_name = 'thomas_2012') - 1,
+  start_upper = get_start_vals(data_50$temperature, data_50$growth, model_name = 'thomas_2012') + 2,
+  lower = get_lower_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  supp_errors = 'Y',
+  convergence_count = FALSE,
+  modelweights = 1/data_50$sd_growth
+)
+
+#100 PHOTONS 
+nls_fit_100 <- nls_multstart(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_100,
+  iter = c(4,4,4,4),
+  start_lower = get_start_vals(data_100$temperature, data_100$growth, model_name = 'thomas_2012') - 1,
+  start_upper = get_start_vals(data_100$temperature, data_100$growth, model_name = 'thomas_2012') + 2,
+  lower = get_lower_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  supp_errors = 'Y',
+  convergence_count = FALSE,
+  modelweights = 1/data_100$sd_growth
+)
+
+#Check the summaries 
+summary(nls_fit_50)
+summary(nls_fit_100)
+
+#Calculate TPC parameters 
+params_50  <- calc_params(nls_fit_50)  %>% mutate(light = 50)
+params_100 <- calc_params(nls_fit_100) %>% mutate(light = 100)
+params_all <- bind_rows(params_50, params_100)
+print(params_all)
+
+#Get predictions to fit a curve in the TPC
+temp_seq_50  <- data.frame(temperature = seq(min(data_50$temperature),
+                                             max(data_50$temperature),
+                                             length.out = 100))
+temp_seq_100 <- data.frame(temperature = seq(min(data_100$temperature),
+                                             max(data_100$temperature),
+                                             length.out = 100))
+
+preds_50  <- augment(nls_fit_50,  newdata = temp_seq_50)  %>% mutate(light = 50)
+preds_100 <- augment(nls_fit_100, newdata = temp_seq_100) %>% mutate(light = 100)
+preds_all <- bind_rows(preds_50, preds_100)
+
+#Plot the curves for both light intensities 
+ggplot() +
+  geom_point(aes(temperature, growth, col = factor(light)), data = combined_TPC1) +
+  geom_line(aes(temperature, .fitted, col = factor(light)), data = preds_all) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity'
+  )
+
+#Convert the nls_mulstart into a usable format for bootstrapping 
+fit_nlsLM_50 <- nlsLM(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_50,
+  start = coef(nls_fit_50),
+  lower = get_lower_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  weights = 1 / data_50$sd_growth
+)
+
+fit_nlsLM_100 <- nlsLM(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_100,
+  start = coef(nls_fit_100),
+  lower = get_lower_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  weights = 1 / data_100$sd_growth
+)
+
+#Extract residuals
+residuals_50 <- residuals(fit_nlsLM_50)
+residuals_100 <- residuals(fit_nlsLM_100)
+
+#Test normality of mean residuals per temperature
+mean_resid_50 <- data.frame(
+  temperature = data_50$temperature,
+  residual = residuals_50) %>%
+  group_by(temperature) %>%
+  summarise(mean_resid = mean(residual), .groups = 'drop')
+
+cat("=== Normality of Mean Residuals 50 µmol ===\n")
+print(shapiro.test(mean_resid_50$mean_resid))
+
+mean_resid_100 <- data.frame(
+  temperature = data_100$temperature,
+  residual = residuals_100) %>%
+  group_by(temperature) %>%
+  summarise(mean_resid = mean(residual), .groups = 'drop')
+
+cat("=== Normality of Mean Residuals 100 µmol ===\n")
+print(shapiro.test(mean_resid_100$mean_resid))
+
+#Fit the bootstrap 
+set.seed(42)
+boot_50  <- Boot(fit_nlsLM_50,  method = 'residual', R = 999)
+boot_100 <- Boot(fit_nlsLM_100, method = 'residual', R = 999)
+
+#Check the successful bootstraps 
+nrow(boot_50$t[complete.cases(boot_50$t), ])
+nrow(boot_100$t[complete.cases(boot_100$t), ])
+
+#Bootstrap the predictions to fit the curve confidence intervals (CI's)
+boot_preds_50 <- boot_50$t %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  group_by(iter) %>%
+  reframe(
+    temperature = temp_seq_50$temperature,
+    fitted = thomas_2012(temp = temp_seq_50$temperature, a, b, c, tref)
+  ) %>%
+  group_by(temperature) %>%
+  summarise(
+    lower_ci = quantile(fitted, 0.025, na.rm = TRUE),
+    upper_ci = quantile(fitted, 0.975, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(light = 50)
+
+boot_preds_100 <- boot_100$t %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  group_by(iter) %>%
+  reframe(
+    temperature = temp_seq_100$temperature,
+    fitted = thomas_2012(temp = temp_seq_100$temperature, a, b, c, tref)
+  ) %>%
+  group_by(temperature) %>%
+  summarise(
+    lower_ci = quantile(fitted, 0.025, na.rm = TRUE),
+    upper_ci = quantile(fitted, 0.975, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(light = 100)
+
+boot_preds_all <- bind_rows(boot_preds_50, boot_preds_100)
+
+#Final bootstrapped plot with CI's
+ggplot() +
+  geom_ribbon(aes(temperature, ymin = lower_ci, ymax = upper_ci, fill = factor(light)),
+              data = boot_preds_all, alpha = 0.2) +
+  geom_point(aes(temperature, growth, col = factor(light)),
+                        data = combined_TPC1) +          
+  geom_line(aes(temperature, .fitted, col = factor(light)),
+            data = preds_all) +
+  geom_hline(yintercept = 0, linetype = 'solid', colour = 'black', linewidth = 0.5) +
+  scale_x_continuous(breaks = seq(0, 20, by = 5),
+                     limits = c(0, 20),
+                     expand = c(0, 0)) +
+  scale_colour_manual(values = c('50' = 'blue', '100' = 'red')) +  
+  scale_fill_manual(values   = c('50' = 'blue', '100' = 'red')) +  
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity 
+    (μmol photons m-2 s-1)',
+    fill = 'Light Intensity 
+    (μmol photons m-2 s-1)'
+  )
+
+##############################
+
+#Get the derived parameters from the bootstrapped values 
+get_derived_from_coefs <- function(a, b, c, tref) {
+  
+  # Search only within the observed data range to avoid extrapolation 
+  temp_seq <- seq(3.2, 18.3, length.out = 100000)
+  rate     <- thomas_2012(temp = temp_seq, a = a, b = b, c = c, tref = tref)
+  
+  topt     <- temp_seq[which.max(rate)]
+  rmax     <- max(rate, na.rm = TRUE)
+  positive <- rate > 0
+  ctmax    <- if (any(positive)) max(temp_seq[positive]) else NA
+  rate_at_T   <- thomas_2012(temp = 3.2,  a = a, b = b, c = c, tref = tref)
+  rate_at_Topt <- thomas_2012(temp = topt, a = a, b = b, c = c, tref = tref)
+  q10         <- (rate_at_Topt / rate_at_T)^(10/(topt - 3.2))
+  above_80    <- rate >= (rmax * 0.8)
+  niche_width <- if (any(above_80)) {
+    max(temp_seq[above_80]) - min(temp_seq[above_80])
+  } else NA
+  
+  return(data.frame(topt, rmax, ctmax, q10, niche_width))
+}
+
+cat("=== Light 50 ===\n")
+get_derived_from_coefs(
+  a    = coef(fit_nlsLM_50)['a'],
+  b    = coef(fit_nlsLM_50)['b'],
+  c    = coef(fit_nlsLM_50)['c'],
+  tref = coef(fit_nlsLM_50)['tref']
+) %>% print()
+
+cat("=== Light 100 ===\n")
+get_derived_from_coefs(
+  a    = coef(fit_nlsLM_100)['a'],
+  b    = coef(fit_nlsLM_100)['b'],
+  c    = coef(fit_nlsLM_100)['c'],
+  tref = coef(fit_nlsLM_100)['tref']
+) %>% print()
+
+#Bootstrap the derived parameters 
+
+#50 PHOTONS 
+boot_derived_50 <- boot_50$t %>%
+  as.data.frame() %>%
+  setNames(c('a', 'b', 'c', 'tref')) %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  rowwise() %>%
+  mutate(derived = list(get_derived_from_coefs(a, b, c, tref))) %>%
+  ungroup() %>%
+  select(iter, derived) %>%
+  unnest(derived) %>%
+  mutate(light = 50)
+
+#100 PHOTONS 
+boot_derived_100 <- boot_100$t %>%
+  as.data.frame() %>%
+  setNames(c('a', 'b', 'c', 'tref')) %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  rowwise() %>%
+  mutate(derived = list(get_derived_from_coefs(a, b, c, tref))) %>%
+  ungroup() %>%
+  select(iter, derived) %>%
+  unnest(derived) %>%
+  mutate(light = 100)
+
+#Combined the derived data into one dataset 
+boot_derived_all <- bind_rows(boot_derived_50, boot_derived_100)
+
+#Check the successfl bootstraps 
+boot_derived_all %>%
+  group_by(light) %>%
+  summarise(
+    n_topt  = sum(!is.na(topt)),
+    n_ctmax = sum(!is.na(ctmax)),
+    n_rmax  = sum(!is.na(rmax)),
+    n_q10         = sum(!is.na(q10)),
+    n_niche_width = sum(!is.na(niche_width))
+  )
+
+#Calculate the CI's for the derived parameters 
+derived_ci <- boot_derived_all %>%
+  group_by(light) %>%
+  summarise(
+    topt_estimate  = mean(topt,  na.rm = TRUE),
+    topt_lower     = quantile(topt,  0.025, na.rm = TRUE),
+    topt_upper     = quantile(topt,  0.975, na.rm = TRUE),
+    ctmax_estimate = mean(ctmax, na.rm = TRUE),
+    ctmax_lower    = quantile(ctmax, 0.025, na.rm = TRUE),
+    ctmax_upper    = quantile(ctmax, 0.975, na.rm = TRUE),
+    rmax_estimate  = mean(rmax,  na.rm = TRUE),
+    rmax_lower     = quantile(rmax,  0.025, na.rm = TRUE),
+    rmax_upper     = quantile(rmax,  0.975, na.rm = TRUE),
+    q10_estimate         = mean(q10,         na.rm = TRUE),
+    q10_lower            = quantile(q10,         0.025, na.rm = TRUE),
+    q10_upper            = quantile(q10,         0.975, na.rm = TRUE),
+    niche_width_estimate = mean(niche_width, na.rm = TRUE),
+    niche_width_lower    = quantile(niche_width, 0.025, na.rm = TRUE),
+    niche_width_upper    = quantile(niche_width, 0.975, na.rm = TRUE)
+  )
+
+print(derived_ci,  width = Inf)
+
+#Make comparative plots for the derived parameters 
+
+#Define custom panel labels
+param_labels <- c(
+  topt  = 'Topt (°C)',
+  ctmax = 'Tmax (°C)',
+  rmax  = 'μmax (day-1)',
+  q10         = 'Q10',
+  niche_width = 'Niche Width (°C)'
+)
+
+boot_derived_all %>%
+  pivot_longer(cols = c(topt, ctmax, rmax, q10, niche_width),
+               names_to  = 'parameter',
+               values_to = 'value') %>%
+  ggplot(aes(factor(light), value, fill = factor(light))) +
+  geom_violin(alpha = 0.4, trim = FALSE) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, aes(col = factor(light))) +
+  facet_wrap(~parameter, scales = 'free_y',
+             labeller = labeller(parameter = param_labels)) +
+  scale_fill_manual(values = c('50' = 'blue', '100' = 'red')) +
+  scale_colour_manual(values = c('50' = 'blue', '100' = 'red')) +
+  theme_bw(base_size = 12) +
+  labs(
+    x    = 'Light Intensity',
+    y    = 'Parameter value',
+    fill = 'Light Intensity
+     (μmol photons m-2 s-1)',
+    col  = 'Light Intensity
+     (μmol photons m-2 s-1)'
+  )
+
+
+saveRDS(boot_derived_all, file = "boot_derived_TPC1.rds")
+
+#Calculate bootstrap difference intervals between light treatments
+boot_diff <- boot_derived_all %>%
+  pivot_longer(cols = c(topt, ctmax, rmax, q10, niche_width),
+               names_to  = 'parameter',
+               values_to = 'value') %>%
+  pivot_wider(names_from  = light,
+              values_from = value,
+              names_prefix = 'light_') %>%
+  unnest(c(light_50, light_100)) %>%
+  mutate(difference = light_100 - light_50) %>%
+  group_by(parameter) %>%
+  summarise(
+    mean_diff    = mean(difference,               na.rm = TRUE),
+    lower        = quantile(difference, 0.025,    na.rm = TRUE),
+    upper        = quantile(difference, 0.975,    na.rm = TRUE),
+    crosses_zero = lower < 0 & upper > 0,
+    .groups      = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+print(boot_diff)
+
+saveRDS(boot_diff, file = "boot_diff_TPC1.rds")
+
+#################################################################################################
+
+#TRANSFER 2 
+
+#Plot my data
+ggplot(combined_TPC2, aes(temperature, growth, col = factor(light))) +
+  geom_point() +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity'
+  )
+
+#Check structure - check if i am fitting the TPC through the replicates - n > 0 = YES
+combined_TPC2 %>%
+  group_by(light, temperature) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  print(n = Inf)
+
+#Variance per temperature per light - this checks what bootstrapping approach to use based on variance - HERE = WEIGHTED 
+combined_TPC2 %>%
+  group_by(light, temperature) %>%
+  summarise(
+    mean_growth = mean(growth),
+    sd_growth   = sd(growth),
+    cv          = sd_growth / abs(mean_growth) * 100,  # coefficient of variation %
+    .groups = "drop"
+  ) %>%
+  print(n = Inf)
+
+#Calculate the SD for the replicates 
+combined_TPC2 <- combined_TPC2 %>%
+  group_by(light, temperature) %>%
+  mutate(sd_growth = sd(growth, na.rm = TRUE)) %>%
+  ungroup()
+
+#Split data by light level 
+data_50 <- filter(combined_TPC2, light ==50)
+data_100 <- filter (combined_TPC2, light == 100)
+
+#Fit nls_mulstart to get the starting values for each light level 
+#50 PHOTONS 
+nls_fit_50 <- nls_multstart(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_50,
+  iter = c(4,4,4,4),
+  start_lower = get_start_vals(data_50$temperature, data_50$growth, model_name = 'thomas_2012') - 1,
+  start_upper = get_start_vals(data_50$temperature, data_50$growth, model_name = 'thomas_2012') + 2,
+  lower = get_lower_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  supp_errors = 'Y',
+  convergence_count = FALSE,
+  modelweights = 1/data_50$sd_growth
+)
+
+#100 PHOTONS 
+nls_fit_100 <- nls_multstart(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_100,
+  iter = c(4,4,4,4),
+  start_lower = get_start_vals(data_100$temperature, data_100$growth, model_name = 'thomas_2012') - 1,
+  start_upper = get_start_vals(data_100$temperature, data_100$growth, model_name = 'thomas_2012') + 2,
+  lower = get_lower_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  supp_errors = 'Y',
+  convergence_count = FALSE,
+  modelweights = 1/data_100$sd_growth
+)
+
+#Check the summaries 
+summary(nls_fit_50)
+summary(nls_fit_100)
+
+#Calculate TPC parameters 
+params_50  <- calc_params(nls_fit_50)  %>% mutate(light = 50)
+params_100 <- calc_params(nls_fit_100) %>% mutate(light = 100)
+params_all <- bind_rows(params_50, params_100)
+print(params_all)
+
+#Get predictions to fit a curve in the TPC
+temp_seq_50  <- data.frame(temperature = seq(min(data_50$temperature),
+                                             max(data_50$temperature),
+                                             length.out = 100))
+temp_seq_100 <- data.frame(temperature = seq(min(data_100$temperature),
+                                             max(data_100$temperature),
+                                             length.out = 100))
+
+preds_50  <- augment(nls_fit_50,  newdata = temp_seq_50)  %>% mutate(light = 50)
+preds_100 <- augment(nls_fit_100, newdata = temp_seq_100) %>% mutate(light = 100)
+preds_all <- bind_rows(preds_50, preds_100)
+
+#Plot the curves for both light intensities 
+ggplot() +
+  geom_point(aes(temperature, growth, col = factor(light)), data = combined_TPC2) +
+  geom_line(aes(temperature, .fitted, col = factor(light)), data = preds_all) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity'
+  )
+
+#Convert the nls_mulstart into a usable format for bootstrapping 
+fit_nlsLM_50 <- nlsLM(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_50,
+  start = coef(nls_fit_50),
+  lower = get_lower_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_50$temperature, data_50$growth, model_name = 'thomas_2012'),
+  weights = 1 / data_50$sd_growth
+)
+
+fit_nlsLM_100 <- nlsLM(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = data_100,
+  start = coef(nls_fit_100),
+  lower = get_lower_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(data_100$temperature, data_100$growth, model_name = 'thomas_2012'),
+  weights = 1 / data_100$sd_growth
+)
+
+#Extract residuals
+residuals_50 <- residuals(fit_nlsLM_50)
+residuals_100 <- residuals(fit_nlsLM_100)
+
+#Test normality of mean residuals per temperature (as per supervisor feedback)
+mean_resid_50 <- data.frame(
+  temperature = data_50$temperature,
+  residual = residuals_50) %>%
+  group_by(temperature) %>%
+  summarise(mean_resid = mean(residual), .groups = 'drop')
+
+cat("=== Normality of Mean Residuals 50 µmol ===\n")
+print(shapiro.test(mean_resid_50$mean_resid))
+
+mean_resid_100 <- data.frame(
+  temperature = data_100$temperature,
+  residual = residuals_100) %>%
+  group_by(temperature) %>%
+  summarise(mean_resid = mean(residual), .groups = 'drop')
+
+cat("=== Normality of Mean Residuals 100 µmol ===\n")
+print(shapiro.test(mean_resid_100$mean_resid))
+
+
+#Fit the bootstrap 
+set.seed(42)
+boot_50  <- Boot(fit_nlsLM_50,  method = 'residual', R = 999)
+boot_100 <- Boot(fit_nlsLM_100, method = 'residual', R = 999)
+
+#Check the successful bootstraps 
+nrow(boot_50$t[complete.cases(boot_50$t), ])
+nrow(boot_100$t[complete.cases(boot_100$t), ])
+
+#Bootstrap the predictions to fit the curve confidence intervals (CI's)
+boot_preds_50 <- boot_50$t %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  group_by(iter) %>%
+  reframe(
+    temperature = temp_seq_50$temperature,
+    fitted = thomas_2012(temp = temp_seq_50$temperature, a, b, c, tref)
+  ) %>%
+  group_by(temperature) %>%
+  summarise(
+    lower_ci = quantile(fitted, 0.025, na.rm = TRUE),
+    upper_ci = quantile(fitted, 0.975, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(light = 50)
+
+boot_preds_100 <- boot_100$t %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  group_by(iter) %>%
+  reframe(
+    temperature = temp_seq_100$temperature,
+    fitted = thomas_2012(temp = temp_seq_100$temperature, a, b, c, tref)
+  ) %>%
+  group_by(temperature) %>%
+  summarise(
+    lower_ci = quantile(fitted, 0.025, na.rm = TRUE),
+    upper_ci = quantile(fitted, 0.975, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  mutate(light = 100)
+
+boot_preds_all <- bind_rows(boot_preds_50, boot_preds_100)
+
+#Final bootstrapped plot with CI's
+ggplot() +
+  geom_ribbon(aes(temperature, ymin = lower_ci, ymax = upper_ci, fill = factor(light)),
+              data = boot_preds_all, alpha = 0.2) +
+  geom_point(aes(temperature, growth, col = factor(light)),
+             data = combined_TPC2) +          
+  geom_line(aes(temperature, .fitted, col = factor(light)),
+            data = preds_all) +
+  geom_hline(yintercept = 0, linetype = 'solid', colour = 'black', linewidth = 0.5) +
+  scale_x_continuous(breaks = seq(0, 20, by = 5),
+                     limits = c(0, 20),
+                     expand = c(0, 0)) +
+  scale_colour_manual(values = c('50' = 'blue', '100' = 'red')) +  
+  scale_fill_manual(values   = c('50' = 'blue', '100' = 'red')) +  
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)',
+    col = 'Light Intensity 
+    (μmol photons m-2 s-1)',
+    fill = 'Light Intensity 
+    (μmol photons m-2 s-1)'
+  )
+
+##############################
+
+#Get the derived parameters from the bootstrapped values 
+get_derived_from_coefs <- function(a, b, c, tref) {
+  
+  # Search only within the observed data range to avoid extrapolation 
+  temp_seq <- seq(3.2, 18.3, length.out = 100000)
+  rate     <- thomas_2012(temp = temp_seq, a = a, b = b, c = c, tref = tref)
+  
+  topt     <- temp_seq[which.max(rate)]
+  rmax     <- max(rate, na.rm = TRUE)
+  positive <- rate > 0
+  ctmax    <- if (any(positive)) max(temp_seq[positive]) else NA
+  rate_at_T   <- thomas_2012(temp = 3.2,  a = a, b = b, c = c, tref = tref)
+  rate_at_Topt <- thomas_2012(temp = topt, a = a, b = b, c = c, tref = tref)
+  q10         <- (rate_at_Topt / rate_at_T)^(10/(topt - 3.2))
+  above_80    <- rate >= (rmax * 0.8)
+  niche_width <- if (any(above_80)) {
+    max(temp_seq[above_80]) - min(temp_seq[above_80])
+  } else NA
+  
+  return(data.frame(topt, rmax, ctmax, q10, niche_width))
+}
+
+
+cat("=== Light 50 ===\n")
+get_derived_from_coefs(
+  a    = coef(fit_nlsLM_50)['a'],
+  b    = coef(fit_nlsLM_50)['b'],
+  c    = coef(fit_nlsLM_50)['c'],
+  tref = coef(fit_nlsLM_50)['tref']
+) %>% print()
+
+cat("=== Light 100 ===\n")
+get_derived_from_coefs(
+  a    = coef(fit_nlsLM_100)['a'],
+  b    = coef(fit_nlsLM_100)['b'],
+  c    = coef(fit_nlsLM_100)['c'],
+  tref = coef(fit_nlsLM_100)['tref']
+) %>% print()
+
+#Bootstrap the derived parameters 
+
+#50 PHOTONS 
+boot_derived_50 <- boot_50$t %>%
+  as.data.frame() %>%
+  setNames(c('a', 'b', 'c', 'tref')) %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  rowwise() %>%
+  mutate(derived = list(get_derived_from_coefs(a, b, c, tref))) %>%
+  ungroup() %>%
+  select(iter, derived) %>%
+  unnest(derived) %>%
+  mutate(light = 50)
+
+#100 PHOTONS 
+boot_derived_100 <- boot_100$t %>%
+  as.data.frame() %>%
+  setNames(c('a', 'b', 'c', 'tref')) %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  rowwise() %>%
+  mutate(derived = list(get_derived_from_coefs(a, b, c, tref))) %>%
+  ungroup() %>%
+  select(iter, derived) %>%
+  unnest(derived) %>%
+  mutate(light = 100)
+
+#Combined the derived data into one dataset 
+boot_derived_all <- bind_rows(boot_derived_50, boot_derived_100)
+
+#Check the successful bootstraps 
+boot_derived_all %>%
+  group_by(light) %>%
+  summarise(
+    n_topt  = sum(!is.na(topt)),
+    n_ctmax = sum(!is.na(ctmax)),
+    n_rmax  = sum(!is.na(rmax)),
+    n_q10         = sum(!is.na(q10)),
+    n_niche_width = sum(!is.na(niche_width))
+  )
+
+#Calculate the CI's for the derived parameters 
+derived_ci <- boot_derived_all %>%
+  group_by(light) %>%
+  summarise(
+    topt_estimate  = mean(topt,  na.rm = TRUE),
+    topt_lower     = quantile(topt,  0.025, na.rm = TRUE),
+    topt_upper     = quantile(topt,  0.975, na.rm = TRUE),
+    ctmax_estimate = mean(ctmax, na.rm = TRUE),
+    ctmax_lower    = quantile(ctmax, 0.025, na.rm = TRUE),
+    ctmax_upper    = quantile(ctmax, 0.975, na.rm = TRUE),
+    rmax_estimate  = mean(rmax,  na.rm = TRUE),
+    rmax_lower     = quantile(rmax,  0.025, na.rm = TRUE),
+    rmax_upper     = quantile(rmax,  0.975, na.rm = TRUE),
+    q10_estimate         = mean(q10,         na.rm = TRUE),
+    q10_lower            = quantile(q10,         0.025, na.rm = TRUE),
+    q10_upper            = quantile(q10,         0.975, na.rm = TRUE),
+    niche_width_estimate = mean(niche_width, na.rm = TRUE),
+    niche_width_lower    = quantile(niche_width, 0.025, na.rm = TRUE),
+    niche_width_upper    = quantile(niche_width, 0.975, na.rm = TRUE)
+  )
+
+print(derived_ci,  width = Inf)
+
+#Make comparative plots for the derived parameters 
+
+#Define custom panel labels
+param_labels <- c(
+  topt  = 'Topt (°C)',
+  ctmax = 'Tmax (°C)',
+  rmax  = 'μmax (day-1)',
+  q10         = 'Q10',
+  niche_width = 'Niche Width (°C)'
+)
+
+boot_derived_all %>%
+  pivot_longer(cols = c(topt, ctmax, rmax, q10, niche_width),
+               names_to  = 'parameter',
+               values_to = 'value') %>%
+  ggplot(aes(factor(light), value, fill = factor(light))) +
+  geom_violin(alpha = 0.4, trim = FALSE) +
+  geom_boxplot(width = 0.1, outlier.shape = NA, aes(col = factor(light))) +
+  facet_wrap(~parameter, scales = 'free_y',
+             labeller = labeller(parameter = param_labels)) +
+  scale_fill_manual(values = c('50' = 'blue', '100' = 'red')) +
+  scale_colour_manual(values = c('50' = 'blue', '100' = 'red')) +
+  theme_bw(base_size = 12) +
+  labs(
+    x    = 'Light Intensity',
+    y    = 'Parameter value',
+    fill = 'Light Intensity
+     (μmol photons m-2 s-1)',
+    col  = 'Light Intensity
+     (μmol photons m-2 s-1)'
+  )
+
+saveRDS(boot_derived_all, file = "boot_derived_TPC2.rds")
+
+
+#Quantifying the CI overlaps rather than t-test as bootstrap t-tests will provide unrealistic data 
+
+#Calculate bootstrap difference intervals between light treatments
+boot_diff <- boot_derived_all %>%
+  pivot_longer(cols = c(topt, ctmax, rmax, q10, niche_width),
+               names_to  = 'parameter',
+               values_to = 'value') %>%
+  pivot_wider(names_from  = light,
+              values_from = value,
+              names_prefix = 'light_') %>%
+  unnest(c(light_50, light_100)) %>%
+  mutate(difference = light_100 - light_50) %>%
+  group_by(parameter) %>%
+  summarise(
+    mean_diff    = mean(difference,               na.rm = TRUE),
+    lower        = quantile(difference, 0.025,    na.rm = TRUE),
+    upper        = quantile(difference, 0.975,    na.rm = TRUE),
+    crosses_zero = lower < 0 & upper > 0,
+    .groups      = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+print(boot_diff)
+
+saveRDS(boot_diff, file = "boot_diff_TPC2.rds")
+
+
