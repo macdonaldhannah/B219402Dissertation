@@ -163,6 +163,7 @@ for (t in 1:length(temperatures)) {
                          by.column = FALSE, align = "right")
     
     #create temp df and sort desc by slope
+    # Negative growth calculated for temperature 7 at 18.3 degrees 
     if (temperatures[t] == "T7") {
       tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(mu)
     } else {
@@ -251,7 +252,6 @@ output_dir_lRFU <- choose.dir()
 
 cat("Select your GROWTH ESTIMATES OUTPUT folder\n")
 output_dir <- choose.dir()
-
 
 
 ###MAIN LOOP###
@@ -371,6 +371,7 @@ for (t in 1:length(temperatures)) {
                          by.column = FALSE, align = "right")
     
     #create temp df and sort desc by slope
+    # Negative growth calculated for temperature 6 at 15.3 degrees 
     if (temperatures[t] == "T6") {
     tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(mu)
     } else {
