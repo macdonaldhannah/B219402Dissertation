@@ -1,0 +1,51 @@
+#Load required packages 
+library(tidyverse)
+library(dplyr)
+
+#Load boot_diff objects for within transfer light intensity comparisons and add a column identifying which transfer each dataset belongs to
+boot_diff_T1 <- readRDS("boot_diff_TPC1.rds") %>% 
+  mutate(transfer = "Transfer 1")
+
+boot_diff_T2 <- readRDS("boot_diff_TPC2.rds") %>% 
+  mutate(transfer = "Transfer 2")
+
+#Combine boot_diff objects
+boot_diff_combined <- bind_rows(boot_diff_T1, boot_diff_T2)
+
+#Produces the within transfer light intensity comparison tables
+boot_diff_combined %>%
+  select(parameter, transfer, mean_diff, lower, upper, crosses_zero) %>%
+  arrange(parameter, transfer) %>%
+  print(n = Inf)
+
+#Load full bootstrapped parameter distributions for each transfer and add a column identifying each transfer
+boot_derived_T1 <- readRDS("boot_derived_TPC1.rds") %>% 
+  mutate(transfer = "Transfer 1")
+
+boot_derived_T2 <- readRDS("boot_derived_TPC2.rds") %>% 
+  mutate(transfer = "Transfer 2")
+
+#Combine boot_derived objects
+boot_derived_combined <- bind_rows(boot_derived_T1, boot_derived_T2)
+
+#Calculate between transfer differences
+boot_diff_transfers <- boot_derived_combined %>%
+  pivot_longer(cols = c(topt, ctmax, rmax, q10, niche_width),
+               names_to  = 'parameter',
+               values_to = 'value') %>%
+  pivot_wider(names_from  = transfer,
+              values_from = value,
+              names_prefix = 'transfer_') %>%
+  unnest(c(`transfer_Transfer 1`, `transfer_Transfer 2`)) %>%
+  mutate(difference = `transfer_Transfer 2` - `transfer_Transfer 1`) %>%
+  group_by(parameter, light) %>%
+  summarise(
+    mean_diff    = mean(difference, na.rm = TRUE),
+    lower        = quantile(difference, 0.025, na.rm = TRUE),
+    upper        = quantile(difference, 0.975, na.rm = TRUE),
+    crosses_zero = lower < 0 & upper > 0,
+    .groups      = 'drop'
+  ) %>%
+  mutate(across(where(is.numeric), round, 3))
+
+print(boot_diff_transfers)
