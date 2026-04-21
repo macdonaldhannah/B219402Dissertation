@@ -1,0 +1,422 @@
+#TRANSFER 1 
+
+#Load packages 
+library(tidyverse)
+library(readxl)
+library(writexl)
+library(zoo)
+library(dplyr)
+
+###SETTINGS###
+
+#Define temperatures
+temperatures <- c("T1", "T2", "T3", "T4", "T5", "T6", "T7")
+
+#Define wellmap filenames for each temperature
+wellmap_files <- c("wellmap_T1", "wellmap_T2", "wellmap_T3", "wellmap_T4",
+                   "wellmap_T5", "wellmap_T6", "wellmap_T7")
+
+#Define raw data folders for each temperature
+raw_data_paths <- c(
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T1_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T2_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T3_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T4_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T5_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T6_TRF1/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T7_TRF1/"
+)
+
+#Define cond_new for each temperature
+cond_new_list <- c("T1_day_", "T2_day_", "T3_day_", "T4_day_",
+                   "T5_day_", "T6_day_", "T7_day_")
+
+#Shared settings for all temperatures
+cond_raw <- "_day"
+moving_window_point_number <- 3
+matrix_header_line <- 49
+
+#Select folders
+cat("Select your WELLMAPS folder\n")
+well_map_dir <- choose.dir()
+
+cat("Select your LRFU OUTPUT folder\n")
+output_dir_lRFU <- choose.dir()
+
+cat("Select your GROWTH ESTIMATES OUTPUT folder\n")
+output_dir <- choose.dir()
+
+###MAIN LOOP###
+
+for (t in 1:length(temperatures)) {
+  
+  cat("\n#############################\n")
+  cat("Processing temperature:", temperatures[t], "\n")
+  cat("#############################\n")
+  
+  # Set variables for this temperature
+  well_map_filename <- wellmap_files[t]
+  plate_reader_file_path <- raw_data_paths[t]
+  cond_new <- cond_new_list[t]
+  
+  ###########################################################
+  ###---Convert raw fluorescence to combined data frame---###
+  ###########################################################
+  
+  # List of files, each plate separately
+  files <- list.files(path = plate_reader_file_path,
+                      pattern = paste0(cond_raw, "*"))
+  cat("Files found:", length(files), "\n")
+  print(files)
+  
+  # Vector of well map
+  well_map <- read_excel(paste0(well_map_dir, "/", well_map_filename, ".xlsx"))
+  
+  # Create cumulative data frame
+  cumulative_df <- NA
+  
+  # Add backslash to path
+  plate_reader_file_path <- paste0(plate_reader_file_path, "\\")
+  
+  # Import data from files and remove blanks
+  for (k in 1:length(files)) {
+    
+    #grab file from list
+    file <- files[k]
+    
+    #create relative path string for this file
+    rel_path <- paste0(plate_reader_file_path, file)
+    
+    #blanks
+    blank_wells <- well_map[which(well_map[,k+1] == "BLANK"),]$well
+    
+    #import df
+    df <- suppressMessages(read_excel(path = rel_path,
+                                      skip = matrix_header_line - 2))
+    
+    #fix imported df
+    df <- t(df[1:2, 2:ncol(df)])
+    df <- data.frame(well = as.character(df[,1]),
+                     RFU = round(as.numeric(df[,2])))
+    
+    #mean blank value
+    blank_mean <- mean(df[df$well %in% blank_wells,]$RFU)
+    
+    #subtract blank_mean from other values
+    df$RFU_blanked <- round(df$RFU - blank_mean)
+    
+    #day factor
+    df$day <- as.numeric(names(well_map)[k+1])
+    
+    #add well ID; rename
+    df2 <- df %>% left_join(well_map[,c(1,k+1)])
+    names(df2)[ncol(df2)] <- "id"
+    
+    #add df2 values for this file to cumulative df for all files
+    cumulative_df <- rbind(cumulative_df, df2)
+  }
+  
+  # Drop irrelevant wells
+  cumulative_df <- cumulative_df[complete.cases(cumulative_df$id),]
+  
+  # Rename columns, remove RFU_blanked less than or equal to 0, add log RFU
+  cumulative_df <- cumulative_df %>%
+    rename(read_well = well,
+           RFU_raw = RFU) %>%
+    filter(if (temperatures[t] == "T7") RFU_blanked != 0 else RFU_blanked > 0) %>%
+    mutate(lRFU = log(RFU_blanked))
+  
+  # Export df to xlsx
+  write_xlsx(cumulative_df,
+             paste0(output_dir_lRFU, "/", cond_new, "corrected_RFU_series.xlsx"))
+  
+  
+  
+  ###Calculate rolling window slope estimate###
+  
+  
+  # Split df into list by id and remove blank
+  ls <- cumulative_df %>%
+    group_by(id) %>%
+    filter(n() >= 3) %>%
+    filter(id != "BLANK") %>%
+    group_split()
+  
+  # Create new df to write output to
+  z_out <- data.frame(intercept = NA, mu = NA, rsqr = NA, id = NA)
+  
+  # Define how many adjacent points to fit moving lm window to
+  k <- moving_window_point_number
+  
+  # Loop to capture highest slope per id
+  for (i in seq_along(ls)) {
+    
+    #select time and var columns from ls element
+    z <- ls[[i]] %>% select(day, lRFU)
+    
+    #calculate linear regressions coefs
+    tmp_df1 <- rollapply(z, width = k,
+                         function(x) coef(lm(lRFU ~ day, data = as.data.frame(x))),
+                         by.column = FALSE, align = "right")
+    tmp_df2 <- rollapply(z, width = k,
+                         function(x) summary(lm(lRFU ~ day, data = as.data.frame(x)))$r.squared,
+                         by.column = FALSE, align = "right")
+    
+    #create temp df and sort desc by slope
+    if (temperatures[t] == "T7") {
+      tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(mu)
+    } else {
+      tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(-mu)
+    }
+    
+    #output k point regression with greatest slope
+    z_out[i,1:3] <- as.numeric(c(tmps[1,1], tmps[1,2], tmps[1,3]))
+    z_out[i,4] <- as.character(unique(ls[[i]]$id))
+    
+    tmp_df1 <- NULL
+    tmp_df2 <- NULL
+    tmps <- NULL
+    z <- NULL
+  }
+  
+  # Export growth rate estimate df to xlsx
+  write_xlsx(z_out,
+             paste0(output_dir, "/", cond_new, "gr_estimates_k", k, ".xlsx"))
+  
+  
+  ###Create plots for each environment###
+  
+  
+  plots_wLines <- cumulative_df %>%
+    left_join(z_out[,c("id", "mu", "intercept")], by = "id") %>%
+    group_by(id) %>%
+    nest() %>%
+    dplyr::mutate(plot = map(data, ~ ggplot(., aes(x = day, y = lRFU)) +
+                               ggtitle(id) + ylab("ln(RFU)") + geom_point() +
+                               geom_abline(aes(intercept=intercept, slope=mu))),
+                  filename = paste0(id, ".tiff")) %>%
+    ungroup() %>%
+    select(filename, plot)
+  
+  # Create plot directory
+  suppressWarnings(dir.create(paste0(output_dir, "/", cond_new, "plots_wLines_k", k)))
+  
+  # Save plots
+  pwalk(plots_wLines, ggsave, path = paste0(output_dir, "/", cond_new, "plots_wLines_k", k))
+  
+  # View plots
+  walk(plots_wLines$plot, print)
+  
+  cat("\nFinished temperature:", temperatures[t], "\n")
+}
+
+cat("\nALL TEMPERATURES COMPLETE\n")
+
+#######################################################################################################################################
+
+#TRANSFER 2
+
+#Define your temperatures
+temperatures <- c("T1", "T2", "T3", "T4", "T5", "T6")
+
+#Define wellmap filenames for each temperature
+wellmap_files <- c("wellmap_T1", "wellmap_T2", "wellmap_T3", "wellmap_T4",
+                   "wellmap_T5", "wellmap_T6")
+
+#Define raw data folders for each temperature
+raw_data_paths <- c(
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T1_TRF2/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T2_TRF2/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T3_TRF2/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T4_TRF2/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T5_TRF2/",
+  "C:/Users/User/OneDrive/Desktop/12 WELL NEW ACCLIMATION/GROWTH RATE CALC/rawdata/T6_TRF2/"
+)
+
+#Define cond_new for each temperature
+cond_new_list <- c("T1_day_", "T2_day_", "T3_day_", "T4_day_",
+                   "T5_day_", "T6_day_")
+
+#Shared settings for all temperatures
+cond_raw <- "_day"
+moving_window_point_number <- 3
+matrix_header_line <- 49
+
+#Select folders (only need to do this once)
+cat("Select your WELLMAPS folder\n")
+well_map_dir <- choose.dir()
+
+cat("Select your LRFU OUTPUT folder\n")
+output_dir_lRFU <- choose.dir()
+
+cat("Select your GROWTH ESTIMATES OUTPUT folder\n")
+output_dir <- choose.dir()
+
+
+
+###MAIN LOOP###
+
+for (t in 1:length(temperatures)) {
+  
+  cat("\n#############################\n")
+  cat("Processing temperature:", temperatures[t], "\n")
+  cat("#############################\n")
+  
+  # Set variables for this temperature
+  well_map_filename <- wellmap_files[t]
+  plate_reader_file_path <- raw_data_paths[t]
+  cond_new <- cond_new_list[t]
+  
+  ###########################################################
+  ###---Convert raw fluorescence to combined data frame---###
+  ###########################################################
+  
+  # List of files, each plate separately
+  files <- list.files(path = plate_reader_file_path,
+                      pattern = paste0(cond_raw, "*"))
+  cat("Files found:", length(files), "\n")
+  print(files)
+  
+  # Vector of well map
+  well_map <- read_excel(paste0(well_map_dir, "/", well_map_filename, ".xlsx"))
+  
+  # Create cumulative data frame
+  cumulative_df <- NA
+  
+  # Add backslash to path
+  plate_reader_file_path <- paste0(plate_reader_file_path, "\\")
+  
+  # Import data from files and remove blanks
+  for (k in 1:length(files)) {
+    
+    #grab file from list
+    file <- files[k]
+    
+    #create relative path string for this file
+    rel_path <- paste0(plate_reader_file_path, file)
+    
+    #blanks
+    blank_wells <- well_map[which(well_map[,k+1] == "BLANK"),]$well
+    
+    #import df
+    df <- suppressMessages(read_excel(path = rel_path,
+                                      skip = matrix_header_line - 2))
+    
+    #fix imported df
+    df <- t(df[1:2, 2:ncol(df)])
+    df <- data.frame(well = as.character(df[,1]),
+                     RFU = round(as.numeric(df[,2])))
+    
+    #mean blank value
+    blank_mean <- mean(df[df$well %in% blank_wells,]$RFU)
+    
+    #subtract blank_mean from other values
+    df$RFU_blanked <- round(df$RFU - blank_mean)
+    
+    #day factor
+    df$day <- as.numeric(names(well_map)[k+1])
+    
+    #add well ID; rename
+    df2 <- df %>% left_join(well_map[,c(1,k+1)])
+    names(df2)[ncol(df2)] <- "id"
+    
+    #add df2 values for this file to cumulative df for all files
+    cumulative_df <- rbind(cumulative_df, df2)
+  }
+  
+  # Drop irrelevant wells
+  cumulative_df <- cumulative_df[complete.cases(cumulative_df$id),]
+  
+  # Rename columns, remove RFU_blanked less than or equal to 0, add log RFU
+  cumulative_df <- cumulative_df %>%
+    rename(read_well = well,
+           RFU_raw = RFU) %>%
+    filter(if (temperatures[t] == "T6") RFU_blanked != 0 else RFU_blanked > 0) %>%
+    mutate(lRFU = log(RFU_blanked))
+  
+  # Export df to xlsx
+  write_xlsx(cumulative_df,
+             paste0(output_dir_lRFU, "/", cond_new, "corrected_RFU_series.xlsx"))
+  
+  
+ 
+###Calculate rolling window slope estimate###
+
+  
+  # Split df into list by id and remove blank
+  ls <- cumulative_df %>%
+    group_by(id) %>%
+    filter(n() >= 3) %>%
+    filter(id != "BLANK") %>%
+    group_split()
+  
+  # Create new df to write output to
+  z_out <- data.frame(intercept = NA, mu = NA, rsqr = NA, id = NA)
+  
+  # Define how many adjacent points to fit moving lm window to
+  k <- moving_window_point_number
+  
+  # Loop to capture highest slope per id
+  for (i in seq_along(ls)) {
+    
+    #select time and var columns from ls element
+    z <- ls[[i]] %>% select(day, lRFU)
+    
+    #calculate linear regressions coefs
+    tmp_df1 <- rollapply(z, width = k,
+                         function(x) coef(lm(lRFU ~ day, data = as.data.frame(x))),
+                         by.column = FALSE, align = "right")
+    tmp_df2 <- rollapply(z, width = k,
+                         function(x) summary(lm(lRFU ~ day, data = as.data.frame(x)))$r.squared,
+                         by.column = FALSE, align = "right")
+    
+    #create temp df and sort desc by slope
+    if (temperatures[t] == "T6") {
+    tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(mu)
+    } else {
+      tmps <- data.frame(intercept = tmp_df1[,1], mu = tmp_df1[,2], rsqr = tmp_df2) %>% arrange(-mu)
+    }
+    
+    #output k point regression with greatest slope
+    z_out[i,1:3] <- as.numeric(c(tmps[1,1], tmps[1,2], tmps[1,3]))
+    z_out[i,4] <- as.character(unique(ls[[i]]$id))
+    
+    tmp_df1 <- NULL
+    tmp_df2 <- NULL
+    tmps <- NULL
+    z <- NULL
+  }
+  
+  # Export growth rate estimate df to xlsx
+  write_xlsx(z_out,
+             paste0(output_dir, "/", cond_new, "gr_estimates_k", k, ".xlsx"))
+  
+  
+###Create plots for each environment###
+ 
+  
+  plots_wLines <- cumulative_df %>%
+    left_join(z_out[,c("id", "mu", "intercept")], by = "id") %>%
+    group_by(id) %>%
+    nest() %>%
+    dplyr::mutate(plot = map(data, ~ ggplot(., aes(x = day, y = lRFU)) +
+                               ggtitle(id) + ylab("ln(RFU)") + geom_point() +
+                               geom_abline(aes(intercept=intercept, slope=mu))),
+                  filename = paste0(id, ".tiff")) %>%
+    ungroup() %>%
+    select(filename, plot)
+  
+  # Create plot directory
+  suppressWarnings(dir.create(paste0(output_dir, "/", cond_new, "plots_wLines_k", k)))
+  
+  # Save plots
+  pwalk(plots_wLines, ggsave, path = paste0(output_dir, "/", cond_new, "plots_wLines_k", k))
+  
+  # View plots
+  walk(plots_wLines$plot, print)
+  
+  cat("\nFinished temperature:", temperatures[t], "\n")
+}
+
+cat("\nALL TEMPERATURES COMPLETE\n")
+
