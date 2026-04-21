@@ -1,0 +1,53 @@
+#Load packages 
+library(tidyverse)
+library(dplyr)
+
+#Load full bootstrapped parameter distributions for both transfers adding a column to identify each transfer 
+boot_derived_T1 <- readRDS("boot_derived_TPC1.rds") %>% 
+  mutate(transfer = "Transfer 1")
+
+boot_derived_T2 <- readRDS(boot_derived_TPC2.rds") %>% 
+  mutate(transfer = "Transfer 2")
+
+#Combine the boot_derived into one dataframe 
+boot_derived_combined <- bind_rows(boot_derived_T1, boot_derived_T2)
+
+
+#Define custom axis labels for each parameter for use in plots
+param_labels <- c(
+  topt        = 'Topt (°C)',
+  ctmax       = 'Tmax (°C)',
+  rmax        = 'μmax (day-1)',
+  q10         = 'Q10',
+  niche_width = 'Tb80 (°C)'
+)
+
+#Define the list of parameters to plot
+params <- c("topt", "ctmax", "rmax", "q10", "niche_width")
+
+#Loop over each parameter and create a violin and boxplot
+plots_list <- map(params, function(param) {
+  boot_derived_combined %>%
+    pivot_longer(cols = all_of(param),
+                 names_to  = 'parameter',
+                 values_to = 'value') %>%
+    ggplot(aes(factor(light), value, fill = factor(light))) +
+    geom_violin(alpha = 0.4, trim = TRUE) +
+    geom_boxplot(width = 0.1, outlier.shape = NA, aes(col = factor(light))) +
+    facet_wrap(~ transfer) +
+    scale_fill_manual(values = c('50' = 'blue', '100' = 'red')) +
+    scale_colour_manual(values = c('50' = 'blue', '100' = 'red')) +
+    theme_bw(base_size = 12) +
+    labs(
+      x     = 'Light Intensity (μmol photons m-2 s-1)',
+      y     = param_labels[param],
+      fill  = 'Light Intensity\n(μmol photons m-2 s-1)',
+      col   = 'Light Intensity\n(μmol photons m-2 s-1)',
+    )
+})
+
+#Assign parameter names to each plot in the list
+names(plots_list) <- params
+
+#Print all plots 
+walk(plots_list, print)
