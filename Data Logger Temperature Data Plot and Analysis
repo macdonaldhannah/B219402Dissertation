@@ -1,0 +1,18 @@
+#Load packages 
+library(ggplot2)
+
+#Combine date and time into one datetime column
+temp_log_data$datetime <- as.POSIXct(
+  paste(format(temp_log_data$date, "%Y-%m-%d"), 
+        format(temp_log_data$time, "%H:%M:%S")),
+  tz="UTC"
+)
+
+#Plot graph
+ggplot(temp_log_data, aes(x=datetime, y=temperature)) +
+  geom_line() +
+  labs(x="Date", y="Temperature (°C)") +
+  theme_minimal()
+
+#Average temperature excluding logger removal events (>5°C)
+mean(temp_log_data$temperature[temp_log_data$temperature < 5])
