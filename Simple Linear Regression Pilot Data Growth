@@ -1,0 +1,99 @@
+#Simple linear regression for pilot data 
+
+#T1 PLOT -replicate 1
+t1fluo <- T1_trf1
+#this renames my data frame for ease
+
+t1fluo$lnfluo <- log(t1fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+rep1 <-subset(t1fluo, replicate == 1)
+rep1
+#this subsets my data for the replicate that i want
+
+model_rep1 <- lm(lnfluo ~ day, data = rep1)
+summary(model_rep1)
+coef(model_rep1)
+#this takes the linear regression of replicate one and the coef for growth rate
+
+#Replicate 2
+rep2 <-subset(t1fluo, replicate == 2)
+rep2
+#this subsets my data for the replicate that i want
+
+model_rep2 <- lm(lnfluo ~ day, data = rep2)
+summary(model_rep2)
+coef(model_rep2)
+
+#Creating a LOOP for quickness 
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t1fluo, replicate == r)))["day"]
+  )
+}
+
+#T2 
+t2fluo <- T2_6well_TRF1
+t2fluo$lnfluo <- log(t2fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t2fluo, replicate == r)))["day"]
+  )
+}
+
+#T3
+t3fluo <- T3_6well_TRF1
+t3fluo$lnfluo <- log(t3fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t3fluo, replicate == r)))["day"]
+  )
+}
+
+#T4
+t4fluo <- T4_6well_TRF1
+t4fluo$lnfluo <- log(t4fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t4fluo, replicate == r)))["day"]
+  )
+}
+
+#T5
+t5fluo <- T5_6well_TRF1
+t5fluo$lnfluo <- log(t5fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t5fluo, replicate == r)))["day"]
+  )
+}
+
+#T6
+t6fluo <- T6_6well_TRF1
+t6fluo$lnfluo <- log(t6fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t6fluo, replicate == r)))["day"]
+  )
+}
+
+#T7
+t7fluo <- T7_6well_TRF1
+t7fluo$lnfluo <- log(t7fluo$fluorescence)
+#this log transforms all my data to get the exponential 
+
+for (r in 1:5) {
+  print(
+    coef(lm(lnfluo ~ day, data = subset(t7fluo, replicate == r)))["day"]
+  )
+}
