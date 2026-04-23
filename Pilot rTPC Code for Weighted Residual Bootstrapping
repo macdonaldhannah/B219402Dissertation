@@ -1,0 +1,207 @@
+#PILOT DATA
+
+#Load packages
+if (!requireNamespace("remotes", quietly = TRUE)) install.packages("remotes")
+remotes::install_github("padpadpadpad/rTPC")
+
+packages <- c("rTPC", "nls.multstart", "minpack.lm", "car", "broom",
+              "tidyverse", "dplyr", "ggplot2", "readxl", "conflicted")
+
+install.packages(setdiff(packages, rownames(installed.packages())))
+
+library(rTPC)
+library(nls.multstart)
+library(minpack.lm)
+library(car)
+library(broom)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(conflicted)
+
+conflicted::conflicts_prefer(dplyr::select)
+conflicted::conflicts_prefer(dplyr::filter)
+
+
+#Plot pilot data
+ggplot(PILOT_TPC_TRF1, aes(temperature, growth)) +
+  geom_point() +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)'
+  )
+
+#Check structure
+PILOT_TPC_TRF1 %>%
+  group_by(temperature) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  print(n = Inf)
+
+#Variance per temperature
+PILOT_TPC_TRF1 %>%
+  group_by(temperature) %>%
+  summarise(
+    mean_growth = mean(growth),
+    sd_growth   = sd(growth),
+    cv          = sd_growth / abs(mean_growth) * 100,
+    .groups = "drop"
+  ) %>%
+  print(n = Inf)
+
+#Calculate the SD for the replicates
+PILOT_TPC_TRF1 <- TPC_TRF11 %>%
+  group_by(temperature) %>%
+  mutate(sd_growth = sd(growth, na.rm = TRUE)) %>%
+  ungroup()
+
+#Fit nls_multstart
+nls_fit_pilot <- nls_multstart(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = TPC_TRF11,
+  iter = c(4,4,4,4),
+  start_lower = get_start_vals(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012') - 1,
+  start_upper = get_start_vals(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012') + 2,
+  lower = get_lower_lims(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012'),
+  supp_errors = 'Y',
+  convergence_count = FALSE,
+  modelweights = 1/PILOT_TPC_TRF1$sd_growth
+)
+
+#Check summary
+summary(nls_fit_pilot)
+
+#Calculate TPC parameters
+params_pilot <- calc_params(nls_fit_pilot)
+print(params_pilot)
+
+#Get predictions for plotting
+temp_seq_pilot <- data.frame(temperature = seq(min(PILOT_TPC_TRF1$temperature),
+                                               max(PILOT_TPC_TRF1$temperature),
+                                               length.out = 100))
+
+preds_pilot <- augment(nls_fit_pilot, newdata = temp_seq_pilot)
+
+#Plot the curve
+ggplot() +
+  geom_point(aes(temperature, growth), data = PILOT_TPC_TRF1) +
+  geom_line(aes(temperature, .fitted), data = preds_pilot) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)'
+  )
+
+#Convert to nlsLM for bootstrapping
+fit_nlsLM_pilot <- nlsLM(
+  growth ~ thomas_2012(temp = temperature, a, b, c, tref),
+  data = PILOT_TPC_TRF1,
+  start = coef(nls_fit_pilot),
+  lower = get_lower_lims(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012'),
+  upper = get_upper_lims(PILOT_TPC_TRF1$temperature, PILOT_TPC_TRF1$growth, model_name = 'thomas_2012'),
+  weights = 1 / PILOT_TPC_TRF1$sd_growth
+)
+
+#Extract residuals
+residuals_pilot <- residuals(fit_nlsLM_pilot)
+
+#Test normality of mean residuals per temperature
+mean_resid_pilot <- data.frame(
+  temperature = PILOT_TPC_TRF1$temperature,
+  residual = residuals_pilot) %>%
+  group_by(temperature) %>%
+  summarise(mean_resid = mean(residual), .groups = 'drop')
+
+cat("=== Normality of Mean Residuals - Pilot ===\n")
+print(shapiro.test(mean_resid_pilot$mean_resid))
+
+#Fit the bootstrap
+set.seed(42)
+boot_pilot <- Boot(fit_nlsLM_pilot, method = 'residual', R = 999)
+
+#Check successful bootstraps
+nrow(boot_pilot$t[complete.cases(boot_pilot$t), ])
+
+#Bootstrap predictions for CI ribbon
+boot_preds_pilot <- boot_pilot$t %>%
+  as.data.frame() %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  group_by(iter) %>%
+  reframe(
+    temperature = temp_seq_pilot$temperature,
+    fitted = thomas_2012(temp = temp_seq_pilot$temperature, a, b, c, tref)
+  ) %>%
+  group_by(temperature) %>%
+  summarise(
+    lower_ci = quantile(fitted, 0.025, na.rm = TRUE),
+    upper_ci = quantile(fitted, 0.975, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+#Final bootstrapped plot with CI ribbon
+ggplot() +
+  geom_ribbon(aes(temperature, ymin = lower_ci, ymax = upper_ci),
+              data = boot_preds_pilot, alpha = 0.2, fill = 'blue') +
+  geom_point(aes(temperature, growth), data = PILOT_TPC_TRF1) +
+  geom_line(aes(temperature, .fitted), data = preds_pilot, colour = 'blue') +
+  geom_hline(yintercept = 0, linetype = 'solid', colour = 'black', linewidth = 0.5) +
+  scale_x_continuous(breaks = seq(0, 20, by = 5),
+                     limits = c(0, 20),
+                     expand = c(0, 0)) +
+  theme_bw(base_size = 12) +
+  labs(
+    x = 'Temperature (ºC)',
+    y = 'Specific Growth Rate μ (day-1)'
+  )
+
+#Get derived parameters
+get_derived_from_coefs <- function(a, b, c, tref) {
+  temp_seq <- seq(min(PILOT_TPC_TRF1$temperature), max(PILOT_TPC_TRF1$temperature), length.out = 100000)
+  rate     <- thomas_2012(temp = temp_seq, a = a, b = b, c = c, tref = tref)
+  topt     <- temp_seq[which.max(rate)]
+  rmax     <- max(rate, na.rm = TRUE)
+  positive <- rate > 0
+  ctmax    <- if (any(positive)) max(temp_seq[positive]) else NA
+  return(data.frame(topt, rmax, ctmax))
+}
+
+cat("=== Pilot Derived Parameters ===\n")
+get_derived_from_coefs(
+  a    = coef(fit_nlsLM_pilot)['a'],
+  b    = coef(fit_nlsLM_pilot)['b'],
+  c    = coef(fit_nlsLM_pilot)['c'],
+  tref = coef(fit_nlsLM_pilot)['tref']
+) %>% print()
+
+#Bootstrap derived parameters
+boot_derived_pilot <- boot_pilot$t %>%
+  as.data.frame() %>%
+  setNames(c('a', 'b', 'c', 'tref')) %>%
+  drop_na() %>%
+  mutate(iter = 1:n()) %>%
+  rowwise() %>%
+  mutate(derived = list(get_derived_from_coefs(a, b, c, tref))) %>%
+  ungroup() %>%
+  select(iter, derived) %>%
+  unnest(derived)
+
+#Calculate CI's for Topt
+derived_ci_pilot <- boot_derived_pilot %>%
+  summarise(
+    topt_estimate  = mean(topt,  na.rm = TRUE),
+    topt_lower     = quantile(topt,  0.025, na.rm = TRUE),
+    topt_upper     = quantile(topt,  0.975, na.rm = TRUE),
+    ctmax_estimate = mean(ctmax, na.rm = TRUE),
+    ctmax_lower    = quantile(ctmax, 0.025, na.rm = TRUE),
+    ctmax_upper    = quantile(ctmax, 0.975, na.rm = TRUE),
+    rmax_estimate  = mean(rmax,  na.rm = TRUE),
+    rmax_lower     = quantile(rmax,  0.025, na.rm = TRUE),
+    rmax_upper     = quantile(rmax,  0.975, na.rm = TRUE)
+  )
+
+print(derived_ci_pilot, width = Inf)
+
+saveRDS(boot_derived_pilot, file = "boot_derived_pilot.rds")
